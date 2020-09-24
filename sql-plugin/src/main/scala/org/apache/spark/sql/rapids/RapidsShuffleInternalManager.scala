@@ -23,11 +23,13 @@ import com.nvidia.spark.rapids.shuffle.{RapidsShuffleRequestHandler, RapidsShuff
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle._
 import org.apache.spark.shuffle.sort.SortShuffleManager
+import org.apache.spark.shuffle.ucx.{ShuffleTransport, UcxShuffleTransport}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -80,7 +82,7 @@ class RapidsCachingWriter[K, V](
     metricsReporter: ShuffleWriteMetricsReporter,
     catalog: ShuffleBufferCatalog,
     shuffleStorage: RapidsDeviceMemoryStore,
-    rapidsShuffleServer: Option[RapidsShuffleServer],
+    transport: Option[ShuffleTransport],
     metrics: Map[String, SQLMetric]) extends ShuffleWriter[K, V] with Logging {
 
   private val numParts = handle.dependency.partitioner.numPartitions
@@ -207,6 +209,7 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
   }
 
   protected val wrapped = new SortShuffleManager(conf)
+
   GpuShuffleEnv.setRapidsShuffleManagerInitialized(true, this.getClass.getCanonicalName)
   logWarning("Rapids Shuffle Plugin Enabled")
 
@@ -237,31 +240,12 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
     new GpuShuffleBlockResolver(wrapped.shuffleBlockResolver, catalog)
   }
 
-  private[this] lazy val transport: Option[RapidsShuffleTransport] = {
+  private[this] lazy val transport: Option[ShuffleTransport] = {
     if (rapidsConf.shuffleTransportEnabled && !isDriver) {
-      Some(RapidsShuffleTransport.makeTransport(blockManager.shuffleServerId, rapidsConf))
-    } else {
-      None
-    }
-  }
-
-  private[this] lazy val server: Option[RapidsShuffleServer] = {
-    if (rapidsConf.shuffleTransportEnabled && !isDriver) {
-      val requestHandler = new RapidsShuffleRequestHandler() {
-        override def acquireShuffleBuffer(tableId: Int): RapidsBuffer = {
-          val shuffleBufferId = catalog.getShuffleBufferId(tableId)
-          catalog.acquireBuffer(shuffleBufferId)
-        }
-
-        override def getShuffleBufferMetas(sbbId: ShuffleBlockBatchId): Seq[TableMeta] = {
-          (sbbId.startReduceId to sbbId.endReduceId).flatMap(rid => {
-            catalog.blockIdToMetas(ShuffleBlockId(sbbId.shuffleId, sbbId.mapId, rid))
-          })
-        }
-      }
-      val server = transport.get.makeServer(requestHandler)
-      server.start()
-      Some(server)
+      val transport =
+        RapidsShuffleTransport.makeTransport(blockManager.shuffleServerId, rapidsConf)
+      transport.init()
+      Some(transport)
     } else {
       None
     }
@@ -296,7 +280,7 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
           metricsReporter,
           catalog,
           RapidsBufferCatalog.getDeviceStorage,
-          server,
+          transport,
           gpu.dependency.metrics)
       case other =>
         wrapped.getWriter(other, mapId, context, metricsReporter)
@@ -367,7 +351,6 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
 
   override def stop(): Unit = {
     wrapped.stop()
-    server.foreach(_.close())
     transport.foreach(_.close())
   }
 }

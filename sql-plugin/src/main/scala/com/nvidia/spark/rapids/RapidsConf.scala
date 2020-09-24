@@ -593,7 +593,7 @@ object RapidsConf {
     .doc("The class of the specific RapidsShuffleTransport to use during the shuffle.")
     .internal()
     .stringConf
-    .createWithDefault("com.nvidia.spark.rapids.shuffle.ucx.UCXShuffleTransport")
+    .createWithDefault("org.apache.spark.shuffle.ucx.UcxShuffleTransport")
 
   val SHUFFLE_TRANSPORT_MAX_RECEIVE_INFLIGHT_BYTES =
     conf("spark.rapids.shuffle.transport.maxReceiveInflightBytes")
