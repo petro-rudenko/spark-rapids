@@ -21,11 +21,13 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.shuffle.{RapidsShuffleIterator, RapidsShuffleTransport}
-
 import org.apache.spark.{InterruptibleIterator, TaskContext}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.{ShuffleReader, ShuffleReadMetricsReporter}
 import org.apache.spark.sql.types.DataType
+import org.apache.spark.shuffle.ucx.ShuffleTransport
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockBatchId, ShuffleBlockId}
 import org.apache.spark.util.CompletionIterator
 
@@ -52,7 +54,7 @@ class RapidsCachingReader[K, C](
     blocksByAddress: Iterator[(BlockManagerId, Seq[(BlockId, Long, Int)])],
     context: TaskContext,
     metrics: ShuffleReadMetricsReporter,
-    transport: Option[RapidsShuffleTransport],
+    transport: Option[ShuffleTransport],
     catalog: ShuffleBufferCatalog,
     sparkTypes: Array[DataType])
   extends ShuffleReader[K, C]  with Arm with Logging {
