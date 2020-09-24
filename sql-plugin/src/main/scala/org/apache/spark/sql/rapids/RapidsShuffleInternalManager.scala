@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.format.TableMeta
 import com.nvidia.spark.rapids.shuffle.{RapidsShuffleRequestHandler, RapidsShuffleServer, RapidsShuffleTransport}
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
+import scala.collection.mutable
 
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 
@@ -81,13 +82,15 @@ class RapidsCachingWriter[K, V](
     metricsReporter: ShuffleWriteMetricsReporter,
     catalog: ShuffleBufferCatalog,
     shuffleStorage: RapidsDeviceMemoryStore,
-    transport: Option[ShuffleTransport],
+    transport: ShuffleTransport,
     metrics: Map[String, SQLMetric]) extends ShuffleWriter[K, V] with Logging {
 
   private val numParts = handle.dependency.partitioner.numPartitions
   private val sizes = new Array[Long](numParts)
   private val writtenBufferIds = new ArrayBuffer[ShuffleBufferId](numParts)
   private val uncompressedMetric: SQLMetric = metrics("dataSize")
+
+  private val blocksWritten = mutable.HashSet[ShuffleBlockId]()
 
   override def write(records: Iterator[Product2[K, V]]): Unit = {
     val nvtxRange = new NvtxRange("RapidsCachingWriter.write", NvtxColor.CYAN)
@@ -131,6 +134,7 @@ class RapidsCachingWriter[K, V](
                 SpillPriorities.OUTPUT_FOR_SHUFFLE_INITIAL_PRIORITY)
             case c => throw new IllegalStateException(s"Unexpected column type: ${c.getClass}")
           }
+          blocksWritten += blockId
           bytesWritten += partSize
           sizes(partId) += partSize
         } else {
@@ -167,12 +171,33 @@ class RapidsCachingWriter[K, V](
     val nvtxRange = new NvtxRange("RapidsCachingWriter.close", NvtxColor.CYAN)
     try {
       if (!success) {
+        blocksWritten.foreach { bId =>
+          val bufferIds = catalog.blockIdToBuffersIds(bId)
+          bufferIds.foreach { bId =>
+            val buffer = catalog.acquireBuffer(bId)
+            val transportBlock = new RapidsShuffleBlock(bId, buffer.getMemoryBuffer, buffer.meta)
+            transport.register(transportBlock.rapidsBlockId, transportBlock)
+          }
+
+          val metas = catalog.blockIdToMetas(bId)
+
+          val sbId = bId match {
+            case sbbid: ShuffleBlockBatchId => sbbid
+            case sbid: ShuffleBlockId =>
+                ShuffleBlockBatchId(sbid.shuffleId, sbid.mapId, sbid.reduceId, sbid.reduceId)
+            case _ =>
+              throw new IllegalArgumentException(
+                s"${bId.getClass} $bId is not currently supported")
+          }
+          val rapidsMeta = new RapidsShuffleMetaBlock(sbId, metas)
+          transport.register(rapidsMeta.getBlockId, rapidsMeta)
+        }
         cleanStorage()
         None
       } else {
         // upon seeing this port, the other side will try to connect to the port
         // in order to establish an UCX endpoint (on demand), if the topology has "rapids" in it.
-        val shuffleServerId = if (transport.isDefined) {
+        val shuffleServerId = if (transport != null) {
           val originalShuffleServerId = blockManager.blockManagerId
           BlockManagerId(
             originalShuffleServerId.executorId,
@@ -293,7 +318,7 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
           metricsReporter,
           getCatalogOrThrow,
           RapidsBufferCatalog.getDeviceStorage,
-          transport,
+          transport.get,
           gpu.dependency.metrics)
       case other =>
         wrapped.getWriter(other, mapId, context, metricsReporter)
