@@ -172,14 +172,13 @@ class RapidsCachingWriter[K, V](
       } else {
         // upon seeing this port, the other side will try to connect to the port
         // in order to establish an UCX endpoint (on demand), if the topology has "rapids" in it.
-        val shuffleServerId = if (rapidsShuffleServer.isDefined) {
-          val originalShuffleServerId = rapidsShuffleServer.get.originalShuffleServerId
-          val server = rapidsShuffleServer.get
+        val shuffleServerId = if (transport.isDefined) {
+          val originalShuffleServerId = blockManager.blockManagerId
           BlockManagerId(
             originalShuffleServerId.executorId,
             originalShuffleServerId.host,
             originalShuffleServerId.port,
-            Some(s"${RapidsShuffleTransport.BLOCK_MANAGER_ID_TOPO_PREFIX}=${server.getPort}"))
+            Some(s"${RapidsShuffleTransport.BLOCK_MANAGER_ID_TOPO_PREFIX}=spark-ucx"))
         } else {
           blockManager.shuffleServerId
         }
