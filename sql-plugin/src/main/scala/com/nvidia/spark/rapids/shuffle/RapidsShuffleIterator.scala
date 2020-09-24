@@ -16,16 +16,18 @@
 
 package com.nvidia.spark.rapids.shuffle
 
+import java.nio.ByteBuffer
 import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
 
 import scala.collection.mutable
 
 import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.{GpuSemaphore, RapidsBuffer, RapidsConf, ShuffleReceivedBufferCatalog, ShuffleReceivedBufferId}
-
 import org.apache.spark.TaskContext
+
 import org.apache.spark.internal.Logging
-import org.apache.spark.shuffle.{RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
+import org.apache.spark.shuffle.{RapidsMetaBlockId, RapidsMetaResponse, RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
+import org.apache.spark.shuffle.ucx.{BlockId, OperationCallback, OperationResult, OperationStatus, Request, ShuffleTransport}
 import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleMetricsUpdater}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockBatchId, ShuffleBlockId}
@@ -48,8 +50,8 @@ import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockBatchId, S
 class RapidsShuffleIterator(
     localBlockManagerId: BlockManagerId,
     rapidsConf: RapidsConf,
-    transport: RapidsShuffleTransport,
-    blocksByAddress: Array[(BlockManagerId, Seq[(BlockId, Long, Int)])],
+    transport: ShuffleTransport,
+    blocksByAddress: Array[(BlockManagerId, Seq[(org.apache.spark.storage.BlockId, Long, Int)])],
     metricsUpdater: ShuffleMetricsUpdater,
     catalog: ShuffleReceivedBufferCatalog = GpuShuffleEnv.getReceivedCatalog,
     timeoutSeconds: Long = GpuShuffleEnv.shuffleFetchTimeoutSeconds)
@@ -151,10 +153,11 @@ class RapidsShuffleIterator(
     // issue local fetches first
     val (local, remote) = blocksByAddress.partition(ba => ba._1.host == localHost)
 
-    var clients = Seq[RapidsShuffleClient]()
+    var requests = Seq[Request]()
 
     (local ++ remote).foreach {
-      case (blockManagerId: BlockManagerId, blockIds: Seq[(BlockId, Long, Int)]) => {
+      case (blockManagerId: BlockManagerId, blockIds:
+          Seq[(org.apache.spark.storage.BlockId, Long, Int)]) => {
         val shuffleRequestsMapIndex: Seq[BlockIdMapIndex] =
           blockIds.map { case (blockId, _, mapIndex) =>
             /**
@@ -176,22 +179,6 @@ class RapidsShuffleIterator(
             }
           }
 
-        val client = try {
-          transport.makeClient(localExecutorId, blockManagerId)
-        } catch {
-          case t: Throwable => {
-            val errorMsg = s"Error getting client to fetch ${blockIds} from ${blockManagerId}: ${t}"
-            logError(errorMsg, t)
-            val BlockIdMapIndex(firstId, firstMapIndex) = shuffleRequestsMapIndex.head
-            throw new RapidsShuffleFetchFailedException(
-              blockManagerId,
-              firstId.shuffleId,
-              firstId.mapId,
-              firstMapIndex,
-              firstId.startReduceId,
-              errorMsg)
-          }
-        }
 
         val handler = new RapidsShuffleFetchHandler {
           private[this] var clientExpectedBatches = 0L
@@ -250,14 +237,67 @@ class RapidsShuffleIterator(
           }
         }
 
-        logInfo(s"Client $blockManagerId triggered, for ${shuffleRequestsMapIndex.size} blocks")
-        client.doFetch(shuffleRequestsMapIndex.map(_.id), handler)
-        clients = clients :+ client
+        val request = try {
+          val transportRequests =
+            shuffleRequestsMapIndex.map { bId => {
+              val resultBuffer = new RapidsMetaResponse(ByteBuffer.allocateDirect(1024 * 1024))
+              (RapidsMetaBlockId(bId.id), resultBuffer, new OperationCallback {
+                override def onComplete(result: OperationResult): Unit = {
+                  result.getStatus match {
+                    case OperationStatus.SUCCESS =>
+                    // deserialize meta in result buffer
+                      val expectedBatches = 123 // num of batches expected given
+                      //pendingFetchesByAddress // subtract this, make sure we don't remove on .start()
+                      handler.start(expectedBatches)
+                      //fetchBatch(batchId, handler) // call track() and then
+                    // ask for blocks
+                    case _ =>
+                      val err = if (result.getError != null) {
+                        result.getError.getMessage
+                      }  else {
+                        "Error from UCX"
+                      }
+
+                      throw new RapidsShuffleFetchFailedException(
+                        blockManagerId,
+                        bId.id.shuffleId,
+                        bId.id.mapId,
+                        bId.mapIndex,
+                        bId.id.startReduceId,
+                        err)
+                  }
+                }
+              })
+            }}
+
+          transport.fetchBlocksByBlockIds(
+            blockManagerId.executorId,
+            transportRequests.map(_._1),
+            transportRequests.map(_._2),
+            transportRequests.map(_._3))
+        } catch {
+          case t: Throwable => {
+            val errorMsg = s"Error getting client to fetch ${blockIds} from ${blockManagerId}: ${t}"
+            logError(errorMsg, t)
+            val BlockIdMapIndex(firstId, firstMapIndex) = shuffleRequestsMapIndex.head
+            throw new RapidsShuffleFetchFailedException(
+              blockManagerId,
+              firstId.shuffleId,
+              firstId.mapId,
+              firstMapIndex,
+              firstId.startReduceId,
+              errorMsg)
+          }
+        }
+
+        logInfo(s"Request ${request} to $blockManagerId triggered, " +
+            s"for ${shuffleRequestsMapIndex.size} blocks")
+        requests = requests ++ request
       }
     }
 
     logInfo(s"RapidsShuffleIterator for ${Thread.currentThread()} started with " +
-      s"${clients.size} clients.")
+      s"${requests.size} requests.")
   }
 
   private[this] def receiveBufferCleaner(): Unit = {
