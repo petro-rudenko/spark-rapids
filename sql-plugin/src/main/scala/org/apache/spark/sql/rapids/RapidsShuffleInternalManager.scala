@@ -171,7 +171,7 @@ class RapidsCachingWriter[K, V](
     try {
       if (!success) {
         blocksWritten.foreach { bId =>
-          val bufferIds = catalog.blockIdToBuffersIds(bId)
+          val bufferIds: Array[ShuffleBufferId] = catalog.blockIdToBuffersIds(bId)
           bufferIds.foreach { bId =>
             val buffer = catalog.acquireBuffer(bId)
             val transportBlock = new RapidsShuffleBlock(bId, buffer.getMemoryBuffer, buffer.meta)
