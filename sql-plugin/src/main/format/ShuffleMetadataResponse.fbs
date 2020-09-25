@@ -16,51 +16,6 @@ include "ShuffleCommon.fbs";
 
 namespace com.nvidia.spark.rapids.format;
 
-/// Descriptor for a buffer within another uncompressed buffer.
-struct SubBufferMeta {
-  /// byte-offset from the start of the buffer where this buffer begins
-  offset: long;
-
-  /// size in bytes of the buffer
-  length: long;
-}
-
-/// Metadata about cuDF Columns
-table ColumnMeta {
-  /// number of nulls in the column or -1 if unknown
-  null_count: long;
-
-  /// number of rows in the column
-  row_count: long;
-
-  /// information about the column data buffer
-  data: SubBufferMeta;
-
-  /// information about the column validity buffer
-  validity: SubBufferMeta;
-
-  /// information about the column offset buffer
-  offsets: SubBufferMeta;
-
-  /// child column metadata
-  children: [ColumnMeta];
-
-  /// ordinal of DType enum
-  dtype: int;
-}
-
-/// Metadata about cuDF tables
-table TableMeta {
-  /// metadata about the table buffer
-  buffer_meta: BufferMeta;
-
-  /// metadata for each column in the table buffer
-  column_metas: [ColumnMeta];
-
-  /// number of rows in the table
-  row_count: long;
-}
-
 /// Flat buffer for Rapids UCX Shuffle Metadata Response
 table MetadataResponse {
   /// Buffer size in bytes required to hold the full response. If this value is larger than the

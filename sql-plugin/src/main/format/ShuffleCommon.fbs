@@ -55,3 +55,54 @@ table BufferMeta {
   /// array of codec buffer descriptors if the data is compressed
   codec_buffer_descrs: [CodecBufferDescriptor];
 }
+
+/// Descriptor for a buffer within another uncompressed buffer.
+struct SubBufferMeta {
+  /// byte-offset from the start of the buffer where this buffer begins
+  offset: long;
+
+  /// size in bytes of the buffer
+  length: long;
+}
+
+/// Metadata about cuDF Columns
+table ColumnMeta {
+  /// number of nulls in the column or -1 if unknown
+  null_count: long;
+
+  /// number of rows in the column
+  row_count: long;
+
+  /// information about the column data buffer
+  data: SubBufferMeta;
+
+  /// information about the column validity buffer
+  validity: SubBufferMeta;
+
+  /// information about the column offset buffer
+  offsets: SubBufferMeta;
+
+  /// child column metadata
+  children: [ColumnMeta];
+
+  /// ordinal of DType enum
+  dtype: int;
+}
+
+/// Metadata about cuDF tables
+table TableMeta {
+  /// metadata about the table buffer
+  buffer_meta: BufferMeta;
+
+  /// metadata for each column in the table buffer
+  column_metas: [ColumnMeta];
+
+  /// number of rows in the table
+  row_count: long;
+}
+
+
+table BlockMeta {
+  /// metadata about a shuffle block
+  table_metas: [TableMeta];
+}
