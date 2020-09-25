@@ -457,6 +457,20 @@ object ShuffleMetadata extends Logging{
     fbb.dataBuffer()
   }
 
+  def buildBlockMeta(tables: Seq[TableMeta], maximumResponseSize: Long): ByteBuffer = {
+    val fbb = new FlatBufferBuilder(1024, bbFactory)
+    val tableOffsets = copyTables(fbb, tables)
+    val tableMetasOffset = BlockMeta.createTableMetasVector(fbb, tableOffsets)
+    val finIndex = BlockMeta.createBlockMeta(fbb, tableMetasOffset)
+    fbb.finish(finIndex)
+    val bb = fbb.dataBuffer()
+    val responseSize = bb.remaining()
+    if (responseSize > maximumResponseSize) {
+      throw new IllegalStateException("block meta size is bigger than what receiver wants")
+    }
+    bb
+  }
+
   def getBuilder = new FlatBufferBuilder(1024, bbFactory)
 
   def getHeapBuilder = new FlatBufferBuilder(1024)
