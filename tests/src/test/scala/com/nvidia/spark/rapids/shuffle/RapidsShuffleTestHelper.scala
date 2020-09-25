@@ -29,6 +29,9 @@ import org.mockito.Mockito.{spy, when}
 import org.scalatest.{BeforeAndAfterEach, FunSuite}
 import org.scalatest.mockito.MockitoSugar
 
+import org.apache.spark.{SparkConf, SparkEnv}
+
+import org.apache.spark.shuffle.ucx.ShuffleTransport
 import org.apache.spark.sql.rapids.ShuffleMetricsUpdater
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -56,6 +59,7 @@ class RapidsShuffleTestHelper extends FunSuite
   var mockTransaction: Transaction = _
   var mockConnection: MockConnection = _
   var mockTransport: RapidsShuffleTransport = _
+  var mockCommonTransport: ShuffleTransport = _
   var mockExecutor: Executor = _
   var mockCopyExecutor: Executor = _
   var mockHandler: RapidsShuffleFetchHandler = _
@@ -129,6 +133,7 @@ class RapidsShuffleTestHelper extends FunSuite
     when(mockTransaction.getStats).thenReturn(mock[TransactionStats])
     mockConnection = spy(new MockConnection(mockTransaction))
     mockTransport = mock[RapidsShuffleTransport]
+    mockCommonTransport = mock[ShuffleTransport]
     mockExecutor = new ImmediateExecutor
     mockCopyExecutor = new ImmediateExecutor
     mockHandler = mock[RapidsShuffleFetchHandler]
