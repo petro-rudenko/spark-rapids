@@ -21,13 +21,13 @@ import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
 
 import scala.collection.mutable
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{Arm, GpuSemaphore, RapidsBuffer, RapidsConf, ShuffleReceivedBufferCatalog, ShuffleReceivedBufferId}
-
+import ai.rapids.cudf.{DeviceMemoryBuffer, NvtxColor, NvtxRange}
+import com.nvidia.spark.rapids.{Arm, DegenerateRapidsBuffer, GpuSemaphore, RapidsBuffer, RapidsBufferCatalog, RapidsConf, RapidsDeviceMemoryStore, ShuffleBufferId, ShuffleMetadata, ShuffleReceivedBufferCatalog, ShuffleReceivedBufferId, SpillPriorities}
+import com.nvidia.spark.rapids.format.{BlockMeta, TableMeta}
 import org.apache.spark.TaskContext
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.shuffle.{RapidsMetaBlockId, RapidsMetaResponse, RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
+import org.apache.spark.shuffle.{RapidsBlockId, RapidsMetaBlockId, RapidsMetaResponse, RapidsShuffleBlock, RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
 import org.apache.spark.shuffle.ucx.{BlockId, OperationCallback, OperationResult, OperationStatus, Request, ShuffleTransport}
 import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleMetricsUpdater}
 import org.apache.spark.sql.types.DataType
@@ -57,7 +57,8 @@ class RapidsShuffleIterator(
     metricsUpdater: ShuffleMetricsUpdater,
     sparkTypes: Array[DataType],
     catalog: ShuffleReceivedBufferCatalog = GpuShuffleEnv.getReceivedCatalog,
-    timeoutSeconds: Long = GpuShuffleEnv.shuffleFetchTimeoutSeconds)
+    timeoutSeconds: Long = GpuShuffleEnv.shuffleFetchTimeoutSeconds,
+    devStorage: RapidsDeviceMemoryStore = RapidsBufferCatalog.getDeviceStorage)
   extends Iterator[ColumnarBatch]
     with Logging with Arm {
 
@@ -155,6 +156,10 @@ class RapidsShuffleIterator(
   // `taskAttemptId`.
   case class BlockIdMapIndex(id: ShuffleBlockBatchId, mapIndex: Int)
 
+  // this continues to be mutated as we get responses from the transport
+  // if non-empty, we need to fetch
+  var tablesToFetch = Seq[(RapidsShuffleFetchHandler, ShuffleBlockId, TableMeta)]()
+
   def start(): Unit = {
     logInfo(s"Fetching ${blocksByAddress.size} blocks.")
 
@@ -197,10 +202,27 @@ class RapidsShuffleIterator(
                 s"Received an invalid response from shuffle server: " +
                     s"0 expected batches for $shuffleRequestsMapIndex")
             }
-            pendingFetchesByAddress.remove(blockManagerId)
+            val pendingByAddress: Option[Long] = pendingFetchesByAddress.get(blockManagerId)
+            if (!pendingByAddress.isDefined) {
+              throw new IllegalStateException(
+                s"Received a .start call when the ${blockManagerId} " +
+                  s"already received all expected batches.")
+            }
+            val newPending = pendingByAddress.get - expectedBatches
+            if (newPending < 0) {
+              throw new IllegalStateException(
+                s"Received a .start call when the ${blockManagerId} " +
+                    s"already received all expected batches.")
+            } else if (newPending == 0) {
+              // done!
+              pendingFetchesByAddress.remove(blockManagerId)
+            } else {
+              pendingFetchesByAddress.put(blockManagerId, newPending)
+            }
+
             batchesInFlight = batchesInFlight + expectedBatches
             totalBatchesExpected = totalBatchesExpected + expectedBatches
-            clientExpectedBatches = expectedBatches
+            clientExpectedBatches = clientExpectedBatches + expectedBatches
             logDebug(s"Task: $taskAttemptId Client $blockManagerId " +
                 s"Expecting $expectedBatches batches, $batchesInFlight batches currently in " +
                 s"flight, total expected by this client: $clientExpectedBatches, total " +
@@ -246,6 +268,11 @@ class RapidsShuffleIterator(
                   blockManagerId, id, mapIndex, errorMessage, throwable))
               }
             }
+          }
+
+          override def getExecutorId(): String = blockManagerId.executorId
+
+          override def getBlockManagerId(): BlockManagerId = blockManagerId
         }
 
         val request = try {
@@ -256,16 +283,23 @@ class RapidsShuffleIterator(
                 override def onComplete(result: OperationResult): Unit = {
                   result.getStatus match {
                     case OperationStatus.SUCCESS =>
-                    // deserialize meta in result buffer
-                      val expectedBatches = 123 // num of batches expected given
-                      //pendingFetchesByAddress // subtract this, make sure we don't remove on .start()
-                      handler.start(expectedBatches)
-                      //fetchBatch(batchId, handler) // call track() and then
-                    // ask for blocks
+                      // deserialize meta in result buffer
+                      val blockMeta = BlockMeta.getRootAsBlockMeta(resultBuffer.bb)
+                      val numTables = blockMeta.tableMetasLength()
+
+                      // let the iterator know it should expect these
+                      handler.start(numTables)
+
+                      (0 until numTables).foreach { t =>
+                        tablesToFetch = tablesToFetch :+
+                            ((handler,
+                            ShuffleBlockId(bId.id.shuffleId, bId.id.mapId, bId.id.startReduceId),
+                            ShuffleMetadata.copyTableMetaToHeap(blockMeta.tableMetas(t))))
+                      }
                     case _ =>
                       val err = if (result.getError != null) {
                         result.getError.getMessage
-                      }  else {
+                      } else {
                         "Error from UCX"
                       }
 
@@ -324,6 +358,56 @@ class RapidsShuffleIterator(
     }
   }
 
+  def doFetch(
+      sbId: ShuffleBlockId,
+      handler: RapidsShuffleFetchHandler,
+      tableMeta: TableMeta): Unit = {
+    val tableId = tableMeta.bufferMeta().id()
+    val resultBuffer = DeviceMemoryBuffer.allocate(tableMeta.bufferMeta().size())
+    val rapidsBlock = new RapidsShuffleBlock(
+      ShuffleBufferId(sbId, tableId), resultBuffer, tableMeta)
+    transport.fetchBlockByBlockId(
+      handler.getExecutorId(),
+      rapidsBlock.getBlockId,
+      rapidsBlock.getMemoryBlock, (result: OperationResult) => {
+        result.getStatus match {
+          case OperationStatus.SUCCESS =>
+            val id: ShuffleReceivedBufferId = catalog.nextShuffleReceivedBufferId()
+            logDebug(s"Adding buffer id ${id} to catalog")
+            //if (buffer != null) {
+              // add the buffer to the catalog so it is available for spill
+              inflightBytes -= resultBuffer.getLength
+              if (inflightBytes < 0) {
+                throw new IllegalStateException(s"inflightBytes became negative? ${inflightBytes}")
+              }
+              devStorage.addBuffer(
+                id, resultBuffer, tableMeta, SpillPriorities.INPUT_FROM_SHUFFLE_PRIORITY)
+              handler.batchReceived(id)
+            //} else {
+            //  // no device data, just tracking metadata
+            //  // TODO: need to handle this case:
+            //  //  catalog.registerNewBuffer(new DegenerateRapidsBuffer(id, meta))
+            //}
+            id
+          case _ =>
+            val errMsg = if (result.getError != null) {
+              result.getError.getMessage
+            } else {
+              s"Error while fetching batch ${sbId}.${tableId} from UCX"
+            }
+
+            throw new RapidsShuffleFetchFailedException(
+              handler.getBlockManagerId,
+              sbId.shuffleId,
+              sbId.mapId,
+              0,
+              sbId.reduceId,
+              errMsg)
+        }
+      })
+  }
+
+
   // Used to print log messages, defaulting to a value for unit tests
   private[this] lazy val taskAttemptId: String =
     taskContext.map(_.taskAttemptId().toString)
@@ -335,8 +419,17 @@ class RapidsShuffleIterator(
   taskContext.foreach(_.addTaskCompletionListener[Unit](_ => receiveBufferCleaner()))
 
   def pollForResult(timeoutSeconds: Long): Option[ShuffleClientResult] = {
-    Option(resolvedBatches.poll(timeoutSeconds, TimeUnit.SECONDS))
+    var result: Option[ShuffleClientResult] = None
+    // not locking anything since all callbacks are in the task thread
+    while (!markedAsDone && result.isEmpty) {
+      transport.progress() // we are waiting for something
+      result = Some(resolvedBatches.poll())
+    }
+    result
   }
+
+  val fetchUpToBytes = 256 * 1024 * 1024L // 256MB
+  var inflightBytes = 0L
 
   override def next(): ColumnarBatch = {
     var cb: ColumnarBatch = null
@@ -358,12 +451,41 @@ class RapidsShuffleIterator(
     // fetches and so it could produce device memory. Note this is not allowing for some external
     // thread to schedule the fetches for us, it may be something we consider in the future, given
     // memory pressure.
-    taskContext.foreach(GpuSemaphore.acquireIfNecessary)
 
     if (!started) {
       // kick off if we haven't already
       start()
       started = true
+    }
+
+    // make sure we issue all of these, so when we move on to the next part of this
+    // we have all the tables we are going to need in our task
+    // TODO: we may want to not block here if we can get started getting meta
+    //  from some fast peers, this is just for simplicity sake
+    while (pendingFetchesByAddress.nonEmpty) {
+      transport.progress()
+    }
+
+    logInfo(s"Got ${tablesToFetch.size} table metadata for ${TaskContext.get().taskAttemptId()}")
+
+    taskContext.foreach(GpuSemaphore.acquireIfNecessary)
+
+    // send fetch block
+    if (tablesToFetch.isEmpty) {
+      // ask for what we have for now
+      if (inflightBytes < fetchUpToBytes) {
+        val tablesToFetchIter = tablesToFetch.iterator
+        var doRemove = 0
+        while (tablesToFetchIter.hasNext && inflightBytes < fetchUpToBytes) {
+          val (handler, blockId, tableMeta) = tablesToFetchIter.next()
+          inflightBytes += tableMeta.bufferMeta().size()
+          doFetch(blockId, handler, tableMeta)
+          doRemove = doRemove + 1
+        }
+        // all is single threaded, so this is OK for now
+        tablesToFetch = tablesToFetch.drop(doRemove)
+        transport.progress() // send some block requests
+      }
     }
 
     val blockedStart = System.currentTimeMillis()

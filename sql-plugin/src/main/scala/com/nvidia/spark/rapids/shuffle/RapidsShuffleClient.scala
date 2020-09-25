@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.format.{MetadataResponse, TableMeta, TransferStat
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.GpuShuffleEnv
-import org.apache.spark.storage.ShuffleBlockBatchId
+import org.apache.spark.storage.{BlockManagerId, ShuffleBlockBatchId}
 
 /**
  * trait used by client consumers ([[RapidsShuffleIterator]]) to gather what the
@@ -55,6 +55,9 @@ trait RapidsShuffleFetchHandler {
    * @param errorMessage - a string containing an error message
    */
   def transferError(errorMessage: String, throwable: Throwable = null): Unit
+
+  def getExecutorId(): String
+  def getBlockManagerId(): BlockManagerId
 }
 
 /**
