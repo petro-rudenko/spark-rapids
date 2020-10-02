@@ -17,21 +17,20 @@
 package com.nvidia.spark.rapids.shuffle
 
 import java.nio.ByteBuffer
-import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.LinkedBlockingQueue
 
 import scala.collection.mutable
 
 import ai.rapids.cudf.{DeviceMemoryBuffer, NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{DegenerateRapidsBuffer, GpuSemaphore, RapidsBuffer, RapidsBufferCatalog, RapidsConf, RapidsDeviceMemoryStore, ShuffleBufferId, ShuffleMetadata, ShuffleReceivedBufferCatalog, ShuffleReceivedBufferId, SpillPriorities}
 import com.nvidia.spark.rapids.format.{BlockMeta, TableMeta}
+import com.nvidia.spark.rapids._
 import org.apache.spark.TaskContext
-
 import org.apache.spark.internal.Logging
-import org.apache.spark.shuffle.{RapidsBlockId, RapidsMetaBlockId, RapidsMetaResponse, RapidsShuffleBlock, RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
-import org.apache.spark.shuffle.ucx.{BlockId, OperationCallback, OperationResult, OperationStatus, Request, ShuffleTransport}
+import org.apache.spark.shuffle.ucx._
+import org.apache.spark.shuffle.{RapidsMetaBlockId, RapidsMetaResponse, RapidsShuffleBlock, RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
 import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleMetricsUpdater}
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockBatchId, ShuffleBlockId}
+import org.apache.spark.storage.{BlockManagerId, ShuffleBlockBatchId, ShuffleBlockId}
 
 /**
  * An Iterator over columnar batches that fetches blocks using [[RapidsShuffleClient]]s.
@@ -271,7 +270,7 @@ class RapidsShuffleIterator(
           val transportRequests =
             shuffleRequestsMapIndex.map { bId => {
               val resultBuffer = new RapidsMetaResponse(ByteBuffer.allocateDirect(1024 * 1024))
-              (RapidsMetaBlockId(bId.id), resultBuffer, new OperationCallback {
+              (RapidsMetaBlockId(bId.id.name), resultBuffer, new OperationCallback {
                 override def onComplete(result: OperationResult): Unit = {
                   result.getStatus match {
                     case OperationStatus.SUCCESS =>
@@ -413,7 +412,7 @@ class RapidsShuffleIterator(
     // not locking anything since all callbacks are in the task thread
     while (!markedAsDone && result.isEmpty) {
       transport.progress() // we are waiting for something
-      result = Some(resolvedBatches.poll())
+      result = Option(resolvedBatches.poll())
     }
     result
   }
@@ -461,7 +460,7 @@ class RapidsShuffleIterator(
     taskContext.foreach(GpuSemaphore.acquireIfNecessary)
 
     // send fetch block
-    if (tablesToFetch.isEmpty) {
+    if (!tablesToFetch.isEmpty) {
       // ask for what we have for now
       if (inflightBytes < fetchUpToBytes) {
         val tablesToFetchIter = tablesToFetch.iterator
