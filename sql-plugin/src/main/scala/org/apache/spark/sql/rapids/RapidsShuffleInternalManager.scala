@@ -273,6 +273,7 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
       val transport =
         RapidsShuffleTransport.makeTransport(blockManager.shuffleServerId, rapidsConf)
       initUcxTransport(transport.asInstanceOf[UcxShuffleTransport])
+      RapidsBufferCatalog.setTransport(transport)
       Some(transport)
     } else {
       None
