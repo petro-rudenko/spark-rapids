@@ -21,24 +21,24 @@ import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.Success
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
+import ai.rapids.cudf.{Cuda, NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.shuffle.RapidsShuffleTransport
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.rpc.RpcEnv
-import org.apache.spark.{SecurityManager, ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle._
 import org.apache.spark.shuffle.sort.SortShuffleManager
-import org.apache.spark.shuffle.ucx.{ShuffleTransport, UcxShuffleTransport}
-import org.apache.spark.shuffle.ucx.rpc.{UcxDriverRpcEndpoint, UcxExecutorRpcEndpoint}
 import org.apache.spark.shuffle.ucx.rpc.UcxRpcMessages.{ExecutorAdded, IntroduceAllExecutors}
+import org.apache.spark.shuffle.ucx.rpc.{UcxDriverRpcEndpoint, UcxExecutorRpcEndpoint}
 import org.apache.spark.shuffle.ucx.utils.SerializableDirectBuffer
+import org.apache.spark.shuffle.ucx.{ShuffleTransport, UcxShuffleTransport}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage._
 import org.apache.spark.util.RpcUtils
+import org.apache.spark.{SecurityManager, ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 
 class GpuShuffleHandle[K, V](
     val wrapped: ShuffleHandle,
@@ -284,9 +284,12 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
 
   // TODO: initialize through IO plugin at the process start
   private def initDriverRpc(): Unit = {
-    val rpcEnv = SparkEnv.get.rpcEnv
-    val driverEndpoint = new UcxDriverRpcEndpoint(rpcEnv)
-    rpcEnv.setupEndpoint(driverEndpointName, driverEndpoint)
+    if (!initialized) {
+      val rpcEnv = SparkEnv.get.rpcEnv
+      val driverEndpoint = new UcxDriverRpcEndpoint(rpcEnv)
+      rpcEnv.setupEndpoint(driverEndpointName, driverEndpoint)
+      initialized = true
+    }
   }
 
   private def initUcxTransport(ucxTransport: UcxShuffleTransport): Unit = this.synchronized {
