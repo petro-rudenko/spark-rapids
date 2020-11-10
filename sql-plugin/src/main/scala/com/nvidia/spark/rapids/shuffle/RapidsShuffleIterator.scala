@@ -393,7 +393,6 @@ class RapidsShuffleIterator(
             }
             devStorage.addBuffer(
               id, resultBuffer, tableMetas(i), SpillPriorities.INPUT_FROM_SHUFFLE_PRIORITY)
-            resultBuffer.close()
             handlers(i).batchReceived(id)
             //} else {
             //  // no device data, just tracking metadata
