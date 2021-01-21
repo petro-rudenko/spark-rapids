@@ -267,7 +267,6 @@ class RapidsShuffleIterator(
                   blockManagerId, id, mapIndex, errorMessage, throwable))
               }
             }
-          }
 
           override def getExecutorId(): String = blockManagerId.executorId
 
@@ -311,7 +310,7 @@ class RapidsShuffleIterator(
                         bId.id.mapId,
                         bId.mapIndex,
                         bId.id.startReduceId,
-                        err)
+                        err, new Exception(err))
                   }
                 }
               })
@@ -334,7 +333,7 @@ class RapidsShuffleIterator(
               firstId.mapId,
               firstMapIndex,
               firstId.startReduceId,
-              errorMsg)
+              errorMsg, t)
           }
         }
 
@@ -414,7 +413,7 @@ class RapidsShuffleIterator(
               sbIds(i).mapId,
               0,
               sbIds(i).reduceId,
-              errMsg)
+              errMsg, new Exception("bar"))
         }
       }
     }
