@@ -310,7 +310,8 @@ class RapidsShuffleIterator(
                         bId.id.mapId,
                         bId.mapIndex,
                         bId.id.startReduceId,
-                        err, new Exception(err))
+                        err, 
+                        result.getError)
                   }
                 }
               })
@@ -413,7 +414,8 @@ class RapidsShuffleIterator(
               sbIds(i).mapId,
               0,
               sbIds(i).reduceId,
-              errMsg, new Exception("bar"))
+              errMsg,
+              result.getError)
         }
       }
     }

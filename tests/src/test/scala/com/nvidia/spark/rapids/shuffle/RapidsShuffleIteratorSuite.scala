@@ -94,7 +94,7 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
     val cl = spy(new RapidsShuffleIterator(
       RapidsShuffleTestHelper.makeMockBlockManager("1", "1"),
       mockConf,
-      mockTransport,
+      mockCommonTransport,
       blocksByAddress,
       testMetricsUpdater,
       Array.empty,
