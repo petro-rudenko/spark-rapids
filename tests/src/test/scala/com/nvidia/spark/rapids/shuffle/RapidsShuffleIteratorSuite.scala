@@ -16,15 +16,22 @@
 
 package com.nvidia.spark.rapids.shuffle
 
+import ai.rapids.cudf.DeviceMemoryBuffer
 import com.nvidia.spark.rapids.{RapidsBuffer, ShuffleReceivedBufferId}
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
-
 import org.apache.spark.shuffle.{RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
-import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
+  private val deviceReceiveBuffMgr =
+    new BounceBufferManager[DeviceMemoryBuffer](
+      "device-receive",
+      mockConf.shuffleUcxBounceBuffersSize,
+      mockConf.shuffleUcxDeviceBounceBuffersCount,
+      (size: Long) => DeviceMemoryBuffer.allocate(size))
+
   test("inability to get a client raises a fetch failure") {
     val blocksByAddress = RapidsShuffleTestHelper.getBlocksByAddress
 
@@ -36,7 +43,7 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
       testMetricsUpdater,
       Array.empty,
       mockCatalog,
-      123)
+      123, bounceBufferManager = deviceReceiveBuffMgr)
 
     when(mockTransaction.getStatus).thenReturn(TransactionStatus.Error)
 
@@ -65,7 +72,7 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
         testMetricsUpdater,
         Array.empty,
         mockCatalog,
-        123))
+        123, bounceBufferManager = deviceReceiveBuffMgr))
 
       val ac = ArgumentCaptor.forClass(classOf[RapidsShuffleFetchHandler])
       when(mockTransport.makeClient(any(), any())).thenReturn(client)
@@ -99,7 +106,7 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
       testMetricsUpdater,
       Array.empty,
       mockCatalog,
-      123))
+      123, bounceBufferManager = deviceReceiveBuffMgr))
 
     val ac = ArgumentCaptor.forClass(classOf[RapidsShuffleFetchHandler])
     when(mockTransport.makeClient(any(), any())).thenReturn(client)
@@ -141,7 +148,7 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
       testMetricsUpdater,
       Array.empty,
       mockCatalog,
-      123))
+      123, bounceBufferManager = deviceReceiveBuffMgr))
 
     val ac = ArgumentCaptor.forClass(classOf[RapidsShuffleFetchHandler])
     when(mockTransport.makeClient(any(), any())).thenReturn(client)
@@ -172,7 +179,7 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
       testMetricsUpdater,
       Array.empty,
       mockCatalog,
-      123)
+      123, bounceBufferManager = deviceReceiveBuffMgr)
 
     when(mockTransaction.getStatus).thenReturn(TransactionStatus.Error)
 

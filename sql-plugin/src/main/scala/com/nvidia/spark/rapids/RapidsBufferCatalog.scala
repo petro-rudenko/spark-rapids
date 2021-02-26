@@ -98,6 +98,14 @@ class RapidsBufferCatalog extends Logging {
         }
       }
     }
+    buffer.id match {
+      case id: ShuffleBufferId =>
+        val transportBlock = new RapidsShuffleBlock(id,
+          buffer.getMemoryBuffer.getAddress, buffer.size, buffer.meta)
+        logInfo(s"Mutating block ${transportBlock.rapidsBlockId}")
+        transport.mutate(transportBlock.rapidsBlockId, transportBlock, null)
+      case _ =>
+    }
     bufferMap.compute(buffer.id, updater)
 
   }

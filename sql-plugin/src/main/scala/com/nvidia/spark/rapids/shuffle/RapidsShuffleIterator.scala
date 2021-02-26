@@ -24,6 +24,7 @@ import scala.collection.mutable
 import ai.rapids.cudf.{DeviceMemoryBuffer, NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.format.{BlockMeta, TableMeta}
 import com.nvidia.spark.rapids._
+import org.openucx.jucx.UcxUtils
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.ucx._
@@ -57,7 +58,8 @@ class RapidsShuffleIterator(
     sparkTypes: Array[DataType],
     catalog: ShuffleReceivedBufferCatalog = GpuShuffleEnv.getReceivedCatalog,
     timeoutSeconds: Long = GpuShuffleEnv.shuffleFetchTimeoutSeconds,
-    devStorage: RapidsDeviceMemoryStore = RapidsBufferCatalog.getDeviceStorage)
+    devStorage: RapidsDeviceMemoryStore = RapidsBufferCatalog.getDeviceStorage,
+    bounceBufferManager: BounceBufferManager[DeviceMemoryBuffer])
   extends Iterator[ColumnarBatch]
     with Logging with Arm {
 
@@ -146,6 +148,8 @@ class RapidsShuffleIterator(
   private val localExecutorId = localBlockManagerId.executorId.toLong
 
   private var started: Boolean = false
+
+  private val memoryPool = transport.asInstanceOf[UcxShuffleTransport].deviceMemoryPool
 
   // NOTE: `mapIndex` is utilized by the `FetchFailedException` to reference
   // a map output by index from the statuses collection in `MapOutputTracker`.
@@ -276,8 +280,10 @@ class RapidsShuffleIterator(
         val request = try {
           val transportRequests =
             shuffleRequestsMapIndex.map { bId => {
+              val resultMemory = memoryPool.get(1024 * 1024)
               val resultBuffer = new RapidsMetaResponse(
-                ByteBuffer.allocateDirect(1024 * 1024).order(ByteOrder.LITTLE_ENDIAN))
+                UcxUtils.getByteBufferView(resultMemory.address, resultMemory.size.toInt)
+                  .order(ByteOrder.LITTLE_ENDIAN))
               (RapidsMetaBlockId(bId.id.name), resultBuffer, new OperationCallback {
                 override def onComplete(result: OperationResult): Unit = {
                   result.getStatus match {
@@ -293,9 +299,9 @@ class RapidsShuffleIterator(
                       val tablesForExecutor = tablesToFetch(handler.getExecutorId())
                       (0 until numTables).foreach { t =>
                         tablesForExecutor.prepend(
-                            ((handler,
+                            (handler,
                             ShuffleBlockId(bId.id.shuffleId, bId.id.mapId, bId.id.startReduceId),
-                            ShuffleMetadata.copyTableMetaToHeap(blockMeta.tableMetas(t)))))
+                            ShuffleMetadata.copyTableMetaToHeap(blockMeta.tableMetas(t))))
                       }
                     case _ =>
                       val err = if (result.getError != null) {
@@ -313,6 +319,7 @@ class RapidsShuffleIterator(
                         err, 
                         result.getError)
                   }
+                  memoryPool.put(resultMemory)
                 }
               })
             }}
@@ -372,7 +379,7 @@ class RapidsShuffleIterator(
 
     for (i <- sbIds.indices) {
       val tableId = tableMetas(i).bufferMeta().id()
-      val resultBuffer = DeviceMemoryBuffer.allocate(tableMetas(i).bufferMeta().size())
+      val resultBuffer = bounceBufferManager.acquireBuffersNonBlocking(1).head.buffer
       val rapidsBlock = new RapidsShuffleBlock(
         ShuffleBufferId(sbIds(i), tableId),
         resultBuffer.getAddress,
@@ -392,7 +399,8 @@ class RapidsShuffleIterator(
               throw new IllegalStateException(s"inflightBytes became negative? ${inflightBytes}")
             }
             devStorage.addBuffer(
-              id, resultBuffer, tableMetas(i), SpillPriorities.INPUT_FROM_SHUFFLE_PRIORITY)
+              id, resultBuffer.asInstanceOf[DeviceMemoryBuffer],
+              tableMetas(i), SpillPriorities.INPUT_FROM_SHUFFLE_PRIORITY)
             handlers(i).batchReceived(id)
             //} else {
             //  // no device data, just tracking metadata
@@ -409,7 +417,7 @@ class RapidsShuffleIterator(
             resultBuffer.close()
 
             throw new RapidsShuffleFetchFailedException(
-              handlers(i).getBlockManagerId,
+              handlers(i).getBlockManagerId(),
               sbIds(i).shuffleId,
               sbIds(i).mapId,
               0,

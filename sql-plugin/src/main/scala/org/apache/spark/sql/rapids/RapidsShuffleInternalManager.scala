@@ -21,9 +21,10 @@ import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.Success
 
-import ai.rapids.cudf.{Cuda, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{DeviceMemoryBuffer, NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.shuffle.RapidsShuffleTransport
+import com.nvidia.spark.rapids.shuffle.{BounceBufferManager, RapidsShuffleTransport}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.rpc.RpcEnv
@@ -33,7 +34,7 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.shuffle.ucx.rpc.UcxRpcMessages.{ExecutorAdded, IntroduceAllExecutors}
 import org.apache.spark.shuffle.ucx.rpc.{UcxDriverRpcEndpoint, UcxExecutorRpcEndpoint}
 import org.apache.spark.shuffle.ucx.utils.SerializableDirectBuffer
-import org.apache.spark.shuffle.ucx.{ShuffleTransport, UcxShuffleTransport}
+import org.apache.spark.shuffle.ucx.{Block, MemoryBlock, ShuffleTransport, UcxShuffleTransport}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage._
@@ -300,6 +301,14 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
     }
   }
 
+  private val deviceReceiveBuffMgr =
+    new BounceBufferManager[DeviceMemoryBuffer](
+      "device-receive",
+      rapidsConf.shuffleUcxBounceBuffersSize,
+      rapidsConf.shuffleUcxDeviceBounceBuffersCount,
+      (size: Long) => DeviceMemoryBuffer.allocate(size))
+  private val bounceBuferBlockId = RapidsMetaBlockId(ShuffleBlockId(-1, -1, -1).name)
+
   @volatile private var initialized: Boolean = false
   private val driverEndpointName = "ucx-shuffle-driver"
 
@@ -333,6 +342,13 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
             logInfo(s"Receive reply $msg")
             executorEndpoint.receive(msg)
         }
+      ucxTransport.register(bounceBuferBlockId,
+        new Block {
+          override def getMemoryBlock: MemoryBlock = {
+            val rootBoofer = deviceReceiveBuffMgr.getRootBuffer()
+            MemoryBlock(rootBoofer.getAddress, rootBoofer.getLength, isHostMemory = false)
+          }
+        })
       initialized = true
     }
   }
@@ -407,7 +423,8 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
           metrics,
           transport,
           getCatalogOrThrow,
-          gpu.dependency.sparkTypes)
+          gpu.dependency.sparkTypes,
+          deviceReceiveBuffMgr)
       case other => {
         val shuffleHandle = RapidsShuffleInternalManagerBase.unwrapHandle(other)
         wrapped.getReader(shuffleHandle, startPartition, endPartition, context, metrics)
@@ -441,6 +458,7 @@ abstract class RapidsShuffleInternalManagerBase(conf: SparkConf, isDriver: Boole
 
   override def stop(): Unit = {
     wrapped.stop()
+    transport.foreach(t => t.unregister(bounceBuferBlockId))
     transport.foreach(_.close())
   }
 }

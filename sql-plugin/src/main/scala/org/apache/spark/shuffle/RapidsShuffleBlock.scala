@@ -2,11 +2,9 @@ package org.apache.spark.shuffle
 
 import java.nio.ByteBuffer
 
-import ai.rapids.cudf.MemoryBuffer
-import com.nvidia.spark.rapids.{RapidsBufferId, ShuffleBufferId, ShuffleMetadata}
 import com.nvidia.spark.rapids.format.TableMeta
+import com.nvidia.spark.rapids.{RapidsBufferId, ShuffleBufferId, ShuffleMetadata}
 import org.openucx.jucx.UcxUtils
-
 import org.apache.spark.shuffle.ucx.{Block, BlockId, MemoryBlock}
 import org.apache.spark.storage.ShuffleBlockBatchId
 
@@ -25,7 +23,7 @@ class RapidsShuffleMetaBlock(
     ShuffleMetadata.buildBlockMeta(tableMetas, 1024L * 1024L)
 
   override def getMemoryBlock: MemoryBlock = {
-    MemoryBlock(UcxUtils.getAddress(res), res.remaining(), true)
+    MemoryBlock(UcxUtils.getAddress(res), res.remaining(), isHostMemory = true)
   }
 
   def getBlockId: RapidsMetaBlockId = rapidsMetaBlockId

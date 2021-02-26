@@ -18,13 +18,12 @@ package org.apache.spark.sql.rapids
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
+import ai.rapids.cudf.{DeviceMemoryBuffer, NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.shuffle.{RapidsShuffleIterator, RapidsShuffleTransport}
+import com.nvidia.spark.rapids.shuffle.{BounceBufferManager, RapidsShuffleIterator, RapidsShuffleTransport}
 import org.apache.spark.{InterruptibleIterator, TaskContext}
-
 import org.apache.spark.internal.Logging
-import org.apache.spark.shuffle.{ShuffleReader, ShuffleReadMetricsReporter}
+import org.apache.spark.shuffle.{ShuffleReadMetricsReporter, ShuffleReader}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.shuffle.ucx.ShuffleTransport
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -56,7 +55,8 @@ class RapidsCachingReader[K, C](
     metrics: ShuffleReadMetricsReporter,
     transport: Option[ShuffleTransport],
     catalog: ShuffleBufferCatalog,
-    sparkTypes: Array[DataType])
+    sparkTypes: Array[DataType],
+    bounceBufferManager: BounceBufferManager[DeviceMemoryBuffer])
   extends ShuffleReader[K, C]  with Arm with Logging {
 
   override def read(): Iterator[Product2[K, C]] = {
@@ -155,7 +155,8 @@ class RapidsCachingReader[K, C](
 
         val cbArrayFromUcx: Iterator[(K, C)] = if (blocksForRapidsTransport.nonEmpty) {
           val rapidsShuffleIterator = new RapidsShuffleIterator(localId, rapidsConf, transport.get,
-            blocksForRapidsTransport.toArray, metricsUpdater, sparkTypes)
+            blocksForRapidsTransport.toArray, metricsUpdater, sparkTypes,
+            bounceBufferManager = bounceBufferManager)
           rapidsShuffleIterator.map(cb => {
             (0, cb)
           }).asInstanceOf[Iterator[(K, C)]]
